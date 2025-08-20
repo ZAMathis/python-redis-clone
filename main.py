@@ -1,5 +1,6 @@
 import socket
 import threading
+import time
 
 # building a class to parse the RESP stuff, trying 2 keep everything in bytes
 class RESPParser:
@@ -53,7 +54,12 @@ class RESPParser:
 
 def main():
     server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
+    print("Server started on localhost:6379")
+
     RESP_parser = RESPParser()
+
+    # global store for SET and GET commands
+    global_store = {}
     
     # create general functions to handle client connections
     def handle_client(client_socket):
@@ -68,7 +74,7 @@ def main():
                 command = RESP_parser.parse_next()
                 if command is None:
                     break
-                print(f"Received command: {command}")
+                print(f"\nReceived command: {command}")
 
                 # echo
                 if command[0] == b'ECHO':
@@ -76,15 +82,60 @@ def main():
                     client_socket.sendall(b"$" + str(len(msg)).encode() + b"\r\n" + msg + b"\r\n")
 
                 # ping
-                if command[0] == b'PING':
+                elif command[0] == b'PING':
                     client_socket.sendall(b"+PONG\r\n")
+                
+                # set, updated to handle expiration
+                elif command[0] == b'SET':
+                    if len(command) < 3:
+                        client_socket.sendall(b"-ERR wrong number of arguments for 'set' command\r\n")
+                    
+                    key = command[1]
+                    value = command[2]
+                    expiry = None
 
+                    # in order to handle possible expiry, for milliseconds or seconds
+                    if len(command) >= 5 and command[3].upper() == b'PX':
+                        try:
+                            seconds = int(command[4])
+                            expiry = time.time() + seconds / 1000.0
+                        except ValueError:
+                            client_socket.sendall(b"-ERR invalid expiry value\r\n")
+                    elif len(command) >= 5 and command[3].upper() == b'EX':
+                        try:
+                            seconds = int(command[4])
+                            expiry = time.time() + seconds
+                        except ValueError:
+                            client_socket.sendall(b"-ERR invalid expiry value\r\n")
+                        
+                    global_store[key] = (value, expiry)
+                    client_socket.sendall(b"+OK\r\n")
+                
+                # get, updated to check for expiration
+                elif command[0] == b'GET':
+                    if len(command) < 2:
+                        client_socket.sendall(b"-ERR wrong number of arguments for 'get' command\r\n")
+                        return
+
+                    key = command[1]
+                    
+                    if key not in global_store:
+                        client_socket.sendall(b"$-1\r\n")
+                        return
+                    
+                    value, expiry = global_store[key]
+                    if expiry is not None and time.time() > expiry:
+                        del global_store[key]
+                        client_socket.sendall(b"$-1\r\n")
+                        return
+                    
+                    client_socket.sendall(b"$" + str(len(value)).encode() + b"\r\n" + value + b"\r\n")
 
 
     while True:
-        # accept a new client connection
-        print("Waiting for client connection...")
+        # wait for a client connection
         server_socket.listen(1)
+
         # accept the connection
         connection, _ = server_socket.accept() # wait for client
         print("Client connected")
